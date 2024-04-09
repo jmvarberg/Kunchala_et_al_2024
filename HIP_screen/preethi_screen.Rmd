@@ -1,0 +1,530 @@
+---
+title: "Kunchala et al, 2024 - Overexpression Screen Analysis"
+author: "JM Varberg"
+date: "`r Sys.Date()`"
+output:
+    html_document:
+        code_folding: "hide"
+        toc: true
+        toc_depth: 5
+        toc_float: true
+        fig_width: 10
+        fig_height: 8
+        df_print: kable
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning=FALSE, error=FALSE, message=FALSE, cache.lazy = FALSE)
+```
+
+## Load packages
+
+```{r}
+library(data.table)
+library(cowplot)
+library(tidyverse)
+library(kableExtra)
+library(RColorBrewer)
+library(readxl)
+library(janitor)
+library(plotly)
+library(stringr)
+library(ggpubr)
+library(ggfortify)
+library(corrplot)
+```
+
+# 1 Background and Analysis Objectives
+
+Preethi is working with yeast strains that have reduced chromosome number as a result of fusion of the chromosomes together by CRISPR. There are strains with 2 chromosome strains from two independent labs (Boeke and Qin), and a 16 chromosome (same as wild-type lab strains) from the Qin lab. The question being asked in this screen is whether we can identify proteins that help the 2 chromosome strains grow better by over-expression.
+
+Our plan for analysis is to:
+
+1. Read in data that has Control and Test measurements for each gene.
+2. Calculate the fold-change as Test/Control for each spot.
+3. Scale fold-change values to get Z-scores.
+4. Compare Z-scores for 2 vs 16 chromosome strains for Qin
+5. Compare Z-scores for 2 Boeke vs. 2 Qin
+
+# 2 Experimental Design
+
+Each strain was mated to the yeast over-expression library on PlusPlates. Over-expression is controlled by pGal system, so that we can compare growth/colony size on control plates (SD-Ura) with no over-expression versus test (SD-Ura + Gal) condition where expression is turned on.
+
+Each strain was screened against the full library containing 5083 unique genes/proteins. Plates were imaged at Day 2, Day 3, and for the Qin strain also at Day 4. Images from Day 2 were used for colony size measurements and downstream analysis.
+
+
+# 3 Data Pre-Processing 
+
+Upstream of this analysis, colony sizes were measured in Fiji using a macro from Jay Unruh. This returns `.csv` files for each individual plate. We noticed some issues with the values in the combined .xls files that Madeline had generated, so I will go ahead and re-combine all of the plates for each experiment and then add in the strain information from the plate map. The `.xls` files Madeline generated for each plate that has the plate and strain information with an averaged colony size value look correct, so will start from that point.
+
+## 3.1 Data Re-processing
+
+After looking through with Preethi, we also realized there were issues with the ROIs used to make the measurements not always being correctly positioned relative to the colonies. I wrote a short ImageJ macro to correct this, and she re-ran the measurements. This corrected data is now stored in this directory in './data_fixed/'.
+
+# 4 Data Input and Clean-up
+
+# 4.1 Re-mapping fixed data
+
+
+Custom function for reading and averaging data:
+
+```{r}
+read_and_average_data <- function(directory, platemap) {
+  
+  #set up paths
+  path <- paste0(directory, "Day_2/")
+  sample <- basename(directory)
+  controldir <- paste0(path, "SD-URA CONTROL/CSV/")
+  testdir <- paste0(path, "SGAL-URA TEST/CSV/")
+  
+  #read in control files
+  ctrls <- lapply(list.files(controldir, full.names=TRUE), fread)
+  names(ctrls) <- list.files(controldir)
+  ctrls_df <- bind_rows(ctrls, .id = "file")
+  
+  ctrls_full <- ctrls_df %>% 
+    mutate(Plate = str_replace_all(string = file, pattern = "[-_].*", ""), #extract plate number
+           Well = rep(example$Well, 61)) %>% #add in well numbers
+    rename(Control = density)
+  
+  #calculate average colony density for each spot
+  ctrls_avg <- ctrls_full %>% 
+    group_by(Plate, Well) %>% 
+    summarise(across(.cols=Control, mean)) %>% 
+    left_join(., platemap, by=c("Plate", "Well"))
+  
+  ###################################################
+  
+  #read in and average test wells
+  test <- lapply(list.files(testdir, full.names=TRUE), fread)
+  names(test) <- list.files(testdir)
+  test_df <- bind_rows(test, .id = "file")
+  
+  test_full <- test_df %>% 
+    mutate(Plate = str_replace_all(string = file, pattern = "[-_].*", ""), #extract plate number
+           Well = rep(example$Well, 61)) %>% #add in well numbers for all 61 plates
+    rename(Test = density)
+  
+  #calculate average colony density for each spot
+  test_avg <- test_full %>% 
+    group_by(Plate, Well) %>% 
+    summarise(across(.cols=Test, mean)) %>% 
+    left_join(., platemap, by=c("Plate", "Well"))
+  
+  ###################################################
+  
+  #make final data frame with average colony densities for control and test
+  
+  comb_df <- ctrls_avg
+  comb_df$Test <- test_avg$Test
+  
+  #return object that is list of data frames containing the full and averaged for each control and test, and the combined df
+  
+  output <- list(ctrls_full, test_full, ctrls_avg, test_avg, comb_df)
+  df_names <- c("Controls_full_plate", "Test_full_plate", "Controls_averaged", "Test_avaraged", "Combined_average")
+  names(output) <- paste0(sample,"_", df_names)
+  
+  return(output)
+  
+}
+```
+
+```{r cache=FALSE}
+example<-read.csv("./1040-2-B-U_1_avg_list.csv") #this one already has the 384 well Well names info
+plate_to_gene<-read.csv("./Yeast HIP ORF Collection-Clone Information copy.csv")
+plate_to_gene <- plate_to_gene |> 
+  mutate(Plate.Well = paste(Plate, Well, sep="."),
+         SGD = if_else(Plate == 3264 & Well == "A12", "Empty.Vector", SGD))
+
+#version to just map symbols to SGDs
+sgd_to_symbol <- plate_to_gene |> select(SGD, Symbol) |> distinct()
+boeke_2chr_day2 <- read_and_average_data("./data_fixed/2chr_boeke/", plate_to_gene)
+qin_2chr_day2 <- read_and_average_data("./data_fixed/2chr_qin/", plate_to_gene)
+qin_16ch_day2 <- read_and_average_data("./data_fixed/16chr_qin/", plate_to_gene)
+
+```
+
+## 4.2 - Clean up the data
+
+Now that the data is in for each strain, we want to do a little bit of filtering to clean up.
+
+From talking with Jen Gardner and Scott McCroskey, the HIP library is a bit messy - there are examples throughout the library where things were left (in terms of the yeast in the library at that position) but later found to be wrong, but weren't removed physically. These wells will have no information across any of the columns.
+
+Additionally, there are some strains that did not grow up or resuspend well, and as a result didn't get pinned to the plates well. So there are some wells that look blank in our images but are technically in the library (i.e., aren't empty w/r/t yeast). 
+
+There are some entries that don't have an SGD identifier but do have an ORF ID. We want to remove things that don't have either, since we don't know anything about what gene is at this position.
+
+Lastly, we will filter out to remove any rows that have negative values for both control and test colony sizes. We will keep things if they are negative in control and positive in test plates, since this might show that over-expression is beneficial.
+
+***Update 09/22/2022 - Preethi uploaded new CSVs for the bad Qin 2Chr plates. Now there is only one plate from Boeke 2Chr that is being filtered out (plate 800).*** 
+
+```{r}
+tidy_and_filter_data <- function(df) {
+  
+  
+  filtered.df <- df %>% 
+    filter(ORF != "" & SGD != "", Control > 0 & Test > 0) %>% 
+    select(Plate, Well, ORF, SGD, Symbol, Name, Control, Test)
+  
+  return(filtered.df)
+  
+}
+
+`%!in%` <- Negate(`%in%`)
+boeke2.tidy <- tidy_and_filter_data(boeke_2chr_day2[[5]]) %>% filter(Plate != 800)
+qin2.tidy <- tidy_and_filter_data(qin_2chr_day2[[5]]) %>% mutate(Plate = as.character(Plate))
+qin16.tidy <- tidy_and_filter_data(qin_16ch_day2[[5]])
+
+```
+
+```{r}
+labeled_barplot <- function(df, n, y_nudge) {
+  pct_format = scales::percent_format(accuracy = .1)
+  
+  df |> 
+    ggplot(aes(x=n)) +
+    geom_bar() +
+    geom_text(
+      aes(
+        label = sprintf(
+          '%d (%s)',
+          ..count..,
+          pct_format(..count.. / sum(..count..))
+        )
+      ),
+      stat = 'count',
+      position = position_nudge(y = y_nudge),
+      colour = 'black',
+      size = 5
+    ) + theme_cowplot()
+  
+}
+
+qin16.tidy |> group_by(SGD) |> count() |> arrange(desc(n)) |> labeled_barplot(n=n, y_nudge=200) + ggtitle("Number of times a gene is in the HIP library")
+
+```
+
+As we see in the above bar plot, the vast majority of genes are only present in the HIP library once. However, there are ~ 300 genes that are present multiple times. To get single values for these, we will use the average value of all replicates for each gene.
+
+This is simple enough - however, if we want to add information about which position the gene is in and which plate, we will have to change things abit to accommodate multiple entries for this information.
+
+```{r}
+
+summarize_data <- function(data) {
+  
+  #group by SGD and compute average for each strain
+  data_sum <- data |> 
+    group_by(SGD) |> 
+    summarise(across(.cols=Control:Test, mean))
+}
+
+boeke2.sum <- summarize_data(boeke2.tidy)
+qin2.sum <- summarize_data(qin2.tidy)
+qin16.sum <- summarize_data(qin16.tidy)
+
+```
+
+# 5 Data Transformations
+
+For this analysis, we are interested in identifying genes which when over-expressed either improve fitness (i.e., higher colony measurement values in test vs. control) or reduce fitness (lower colony measurements in test vs. control). Additionally, we want to compare the fitness impacts of over-expression between strains.
+
+To do this, we will use the following strategy:
+
+1. Calculate a fold-change value relative to control mean colony measurements: FC = Test/Control.
+2. Convert the fold-change values to z-scores by scaling.
+
+We will ID any positive or negative hits within experiments based on z-score. We will also then compare effects between strains by plotting the z-scores for two conditions against each other.
+
+One of the things I've noticed is that many of the top and bottom z-score results are dominated by values that are very low for both the control and test plates (maybe close to zero for Control, and then increased in Test but to values that are still very low relative to other Test values). This ends up giving us "strong" hits, but when you look on plates they aren't actually interesting because there's very little growth in either condition.
+
+To overcome this, I've built in to this workflow to filter to only keep results that have colony measurements in the top 90% of all measured values. Just looking by eye at the top hits we get using this approach, I already see things jumping out that are clearly detected by eye if you compare Control and Test plates. We can revisit this later to remove or adjust cutoff if we find reason to do so.
+
+
+```{r}
+
+data_transformation <- function(df) {
+  
+  scored.df <- df |>  
+    ungroup() |> 
+    mutate(FC = Test/Control,
+           log2fc = log2(FC),
+           zscore = scale(log2fc),
+           control.percentile = Control/max(Control),
+           test.percentile = Test/max(Test)) |>
+    left_join(select(plate_to_gene, SGD, Symbol), by="SGD") |> 
+    distinct()
+  
+  return(scored.df)
+  
+}
+
+boeke2.scored <- data_transformation(boeke2.sum) %>% filter(control.percentile >= 0.1 & test.percentile >= 0.1) %>% mutate(Exp = "Boeke_2ch")
+qin2.scored <- data_transformation(qin2.sum) %>% filter(control.percentile >= 0.1 & test.percentile >= 0.1) %>% mutate(Exp = "Qin_2ch")
+qin16.scored <- data_transformation(qin16.sum) %>% filter(control.percentile >= 0.1 & test.percentile >= 0.1) %>% mutate(Exp = "Qin_16ch")
+
+```
+
+# 6 Exploratory Plots
+
+Let's combine the data frames and look at PCA plots, correlation plots, 2D density plots etc.
+
+```{r}
+#trying merge approach to combine all three results
+
+Merged <- do.call("rbind", list(boeke2.scored, qin2.scored, qin16.scored))
+combined_wide <- pivot_wider(Merged, id_cols = c("SGD", "Symbol"), names_from = Exp, values_from = "zscore")
+
+```
+
+
+```{r}
+#get matrix with zscore values
+zscore_comp <- combined_wide %>% na.omit()
+zscore_mat <- zscore_comp |> select(Boeke_2ch:Qin_16ch) |> as.matrix()
+variance <- apply(zscore_mat, 1, var)
+zscore_mat <- cbind(zscore_mat, variance)
+stdev <-  apply(zscore_mat, 1, sd)
+zscore_mat <- cbind(zscore_mat, stdev)
+rownames(zscore_mat) <- zscore_comp$SGD
+
+temp <- as.data.frame(zscore_mat) |> 
+  rownames_to_column(var="SGD") |> 
+  arrange(desc(variance)) |> 
+  slice_head(n=100) |> 
+  select(-variance) |>  
+  left_join(sgd_to_symbol) |> 
+  mutate(Symbol = if_else(Symbol == "", SGD, Symbol)) |>  
+  select(-SGD)
+
+temp_mat <- as.matrix(temp[,1:3])
+rownames(temp_mat) <- temp$Symbol
+
+#setting up colors and breaks
+paletteLength <- 50
+myColor <- colorRampPalette(c("red", "white", "blue"))(paletteLength)
+# length(breaks) == length(paletteLength) + 1
+# use floor and ceiling to deal with even/odd length pallettelengths
+myBreaks <- c(seq(min(temp_mat), 0, length.out=ceiling(paletteLength/2) + 1), 
+              seq(max(temp_mat)/paletteLength, max(temp_mat), length.out=floor(paletteLength/2)))
+
+
+
+```
+
+### Correlation Plot
+
+```{r}
+m <- cor(zscore_mat[,1:3])
+corrplot(m)
+```
+
+### Heatmap of top 100 most variable genes
+
+
+```{r fig.width=6, fig.height=12, fig.align="center"}
+
+library(pheatmap)
+pheatmap(temp_mat, color=myColor, breaks=myBreaks)
+
+#save out CSV file of the 100 genes being plotted here, representing top 100 most variable genes.
+write.csv(temp_mat, "./Heatmap_genelist_top_100_variable_genes_2.csv")
+
+```
+
+# 7 Combined data table
+
+Here is the combined data table for each of the three strains. The z-score for each represents the z-score of the log2-FC for each strain, Test/Control. So, a positive z-score means that for that strain, over expression of that gene gave larger colonies on test plate relative to control. Similarly a negative z-score means that over expression of that gene resulted in reduced colony size on the test plate relative to control. I've only confirmed a few visually, but the first couple I looked at the z-score seemed to correlate well with colony size changes by eye.
+
+There are a few big-picture takeaways. 
+
+* First, there's relatively high correlation between all three strains - for the most part, over expression has similar effects on all three strains. 
+* Second, the correlation is higher between the two 2 chromosome strains than between the Qin 2 and 16 chromosome strains. 
+* Third, despite the relatively high correlation between 2 and 16 Qin strains, there are quite a few examples where over-expression was more detrimental for the 2 chromosome strain. 
+
+
+```{r}
+Merged %>% 
+  mutate(across(where(is.numeric), round, 3)) %>% 
+  DT::datatable(extensions = 'Buttons', options = list(
+    scrollY="true",
+    scrollX="true",
+    pageLength = 10,
+    lengthMenu = c(10, 25, 50, 100), 
+    dom = 'Blfrtip',
+    buttons = c('copy', 'csv', 'excel', 'pdf', 'print')
+  )
+  )
+
+```
+
+# 8 Differences in OE impact related to chromosome number
+
+Here, we'll start to look specifically at genes that have different behaviors between 2 chr and 16 chr strains. We want to look at the following categories:
+
+1) Genes that when over expressed have negative effects on both 2 chromosomes, but don't have negative effect on 16 Chr (Only bad for 2chr strains).
+2) Genes that when over expressed have positive effects on both 2 chromosomes, but don't have a positive effect on 16 Chr (Helpful specifically for 2 chr strains).
+3) Genes that when over expressed have negative effects only in 16 chr strain, but not negative for 2 chromosome strains (Usually OE is detrimental, but is tollerated in 2chr context).
+4) Genes that when over expressed have positive effects only in 16 chr strain, but not positive in 2 chr strains (OE is helpful in WT strains but not helpful in 2chr strains).
+
+### 8.1 - Genes negative for 2chr, not for 16 chr 
+
+Let's try to get a list of genes that have negative impacts on colony growth when over expressed in both the 2 chr Qin strain and 2 chr Boeke strain, but are relatively well tolerated in the 16 chr Qin strain.
+
+We will filter to get genes with z-scores <= -1 for Qin 2chr and Boeke 2 chr, and >= 0 for Qin 16 chr.
+
+```{r}
+
+combined_wide <- combined_wide |> 
+  rename(zscore_Qin2 = Qin_2ch,
+         zscore_Qin16 = Qin_16ch,
+         zscore_Boeke2 = Boeke_2ch)
+
+negative_both_2chr <- combined_wide %>% 
+  filter(zscore_Qin2 <= -1 & zscore_Boeke2 <=-1 & zscore_Qin16 >= 0) |> 
+  mutate(cluster = 1)
+
+negative_both_2chr %>% 
+  mutate(across(where(is.numeric), round, 3)) %>% 
+  DT::datatable(extensions = 'Buttons', options = list(
+    scrollY="true",
+    scrollX="true",
+    pageLength = 10,
+    lengthMenu = c(10, 25, 50, 100), 
+    dom = 'Blfrtip',
+    buttons = c('copy', 'csv', 'excel', 'pdf', 'print')
+  )
+  )
+
+
+
+```
+
+### 8.2 - Genes positive for 2chr, not for 16 chr
+
+Same as above, but selecting for genes with z-scores above 1 for both Qin and Boeke 2 chr strains, <= 0 for Qin 16
+
+```{r}
+positive_both_2chr <- combined_wide %>% 
+  filter(zscore_Qin2 >= 1 & zscore_Boeke2 >= 1 & zscore_Qin16 <=0) |> 
+  mutate(cluster = 2)
+
+positive_both_2chr %>% 
+  mutate(across(where(is.numeric), round, 3)) %>% 
+  DT::datatable(extensions = 'Buttons', options = list(
+    scrollY="true",
+    scrollX="true",
+    pageLength = 10,
+    lengthMenu = c(10, 25, 50, 100), 
+    dom = 'Blfrtip',
+    buttons = c('copy', 'csv', 'excel', 'pdf', 'print')
+  )
+  )
+```
+
+### 8.3 - Genes negative for 16 chr, not for 2 chr
+
+```{r}
+negative_16_only <- combined_wide %>% 
+  filter(zscore_Qin2 >= 0 & zscore_Boeke2 >= 0 & zscore_Qin16 <=-1) |>
+  mutate(cluster = 3)
+
+negative_16_only %>% 
+  mutate(across(where(is.numeric), round, 3)) %>% 
+  DT::datatable(extensions = 'Buttons', options = list(
+    scrollY="true",
+    scrollX="true",
+    pageLength = 10,
+    lengthMenu = c(10, 25, 50, 100), 
+    dom = 'Blfrtip',
+    buttons = c('copy', 'csv', 'excel', 'pdf', 'print')
+  )
+  )
+```
+
+### 8.4 - Genes positive for 16 chr, not for 2 chr
+
+```{r}
+positive_16_only <- combined_wide %>% 
+  filter(zscore_Qin2 <= 0 & zscore_Boeke2 <= 0 & zscore_Qin16 >=1) |> 
+  mutate(cluster = 4)
+
+positive_16_only %>% 
+  mutate(across(where(is.numeric), round, 3)) %>% 
+  DT::datatable(extensions = 'Buttons', options = list(
+    scrollY="true",
+    scrollX="true",
+    pageLength = 10,
+    lengthMenu = c(10, 25, 50, 100), 
+    dom = 'Blfrtip',
+    buttons = c('copy', 'csv', 'excel', 'pdf', 'print')
+  )
+  )
+```
+
+### 8.5 - Heat map of specific hits list
+
+```{r}
+
+merged_hits <- positive_16_only |> 
+  bind_rows(negative_16_only) |> 
+  bind_rows(positive_both_2chr) |> 
+  bind_rows(negative_both_2chr) |> 
+  dplyr::mutate(Symbol = if_else(Symbol == "", SGD, Symbol),
+                Cluster = factor(cluster, levels = c("1", "2", "3", "4"))) |> 
+  dplyr::select(Symbol, zscore_Boeke2, zscore_Qin2, zscore_Qin16, Cluster) |>
+  dplyr::arrange(Cluster, desc(zscore_Qin16)) |> 
+  tibble::column_to_rownames(var="Symbol")
+
+merged_hits %>% 
+  mutate(across(where(is.numeric), round, 3)) %>% 
+  DT::datatable(extensions = 'Buttons', options = list(
+    scrollY="true",
+    scrollX="true",
+    pageLength = 10,
+    lengthMenu = c(10, 25, 50, 100), 
+    dom = 'Blfrtip',
+    buttons = c('copy', 'csv', 'excel', 'pdf', 'print')
+  )
+  )
+
+colnames(merged_hits) <- c("2B", "2Q", "WT", "Cluster")
+
+annot_row <- merged_hits |>
+  dplyr::select(Cluster)
+
+
+hits_df <- merged_hits |> 
+  dplyr::select(-Cluster)
+
+#find rows for breaks
+row_breaks <- merged_hits |> 
+  dplyr::group_by(Cluster) |> 
+  count() |> 
+  ungroup() |> 
+  mutate(Breaks = cumsum(n))
+
+my_annot_cols <- list(Cluster = ggsci::pal_igv("default", alpha = 1)(4))
+names(my_annot_cols$Cluster) <- levels(merged_hits$Cluster)
+
+pheatmap(hits_df, color=myColor, breaks=myBreaks, annotation_row = annot_row, annotation_colors = my_annot_cols, cluster_rows = FALSE, border_color=NA, gaps_row=row_breaks$Breaks)
+
+pdf("./plots/Heatmap_hits_with_cluster_IDs.pdf", height=8, width=4)
+pheatmap(hits_df, color=myColor, breaks=myBreaks, annotation_row = annot_row, annotation_colors = my_annot_cols, cluster_rows = FALSE, border_color=NA, gaps_row=row_breaks$Breaks)
+dev.off()
+
+```
+
+
+# Session Info
+
+Below is the session information describing the versions of R and any attached packages that were used for this analysis.
+
+```{r}
+sessionInfo()
+```
+
+
+
+
+
+
